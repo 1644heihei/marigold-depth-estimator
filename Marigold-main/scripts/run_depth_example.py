@@ -9,10 +9,16 @@ The script loads a pretrained model from Hugging Face by default (prs-eth/marigo
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import torch
 from PIL import Image
+
+# Add repo root to sys.path so we can import marigold from anywhere
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
 # Import local marigold package (the package in this repo)
 from marigold import MarigoldDepthPipeline
