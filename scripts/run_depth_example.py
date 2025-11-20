@@ -2,7 +2,7 @@
 Simple runner to perform depth inference with MarigoldDepthPipeline.
 
 Usage example (PowerShell):
-  python .\scripts\run_depth_example.py --image .\examples\input.jpg --out .\out\depth.png
+  python .\Marigold-main\scripts\run_depth_example.py --image .\examples\00000.png --out .\out\00000_depth.png
 
 The script loads a pretrained model from Hugging Face by default (prs-eth/marigold-depth-v1-1).
 """
