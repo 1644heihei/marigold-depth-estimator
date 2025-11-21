@@ -2,15 +2,15 @@
 Simple runner to perform depth inference with MarigoldDepthPipeline.
 
 Usage example (PowerShell):
-  python .\Marigold-main\scripts\run_depth_example.py --image .\examples\00000.png --out .\out\00000_depth.png
+  python .\scripts\run_depth_example.py --image .\examples\00000.png --out .\out\00000_depth.png
 
 The script loads a pretrained model from Hugging Face by default (prs-eth/marigold-depth-v1-1).
 """
 
-import argparse
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from PIL import Image
@@ -24,44 +24,64 @@ if str(_repo_root) not in sys.path:
 from marigold import MarigoldDepthPipeline
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument(
-        "--model",
-        default="prs-eth/marigold-depth-v1-1",
-        help="Hugging Face repo id or local path",
+def get_config():
+    """Load configuration from environment variables with sensible defaults.
+
+    Environment variables (examples):
+      MARIGOLD_MODEL
+      MARIGOLD_EXAMPLES_DIR
+      MARIGOLD_PATTERN
+      MARIGOLD_OUT_DIR
+      MARIGOLD_DEVICE
+      MARIGOLD_DENOISING_STEPS
+      MARIGOLD_ENSEMBLE_SIZE
+      MARIGOLD_PROCESSING_RES
+      MARIGOLD_NO_COLOR (set to '1' or 'true' to enable)
+    """
+
+    env = os.environ
+
+    def env_int(key, default):
+        v = env.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    def env_bool(key):
+        v = env.get(key)
+        if v is None:
+            return False
+        return str(v).lower() in ("1", "true", "yes")
+
+    model = env.get("MARIGOLD_MODEL", "prs-eth/marigold-depth-v1-1")
+    examples_dir = env.get("MARIGOLD_EXAMPLES_DIR", "examples")
+    pattern = env.get("MARIGOLD_PATTERN", "*.png")
+    out_dir = env.get("MARIGOLD_OUT_DIR", "out")
+    device = env.get("MARIGOLD_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+    denoising_steps = env.get("MARIGOLD_DENOISING_STEPS", "")
+    denoising_steps = None if denoising_steps == "" else int(denoising_steps)
+    ensemble_size = env_int("MARIGOLD_ENSEMBLE_SIZE", 1)
+    processing_res = env_int("MARIGOLD_PROCESSING_RES", 512)
+    no_color = env_bool("MARIGOLD_NO_COLOR")
+
+    return SimpleNamespace(
+        model=model,
+        examples_dir=examples_dir,
+        pattern=pattern,
+        out_dir=out_dir,
+        device=device,
+        denoising_steps=denoising_steps,
+        ensemble_size=ensemble_size,
+        processing_res=processing_res,
+        no_color=no_color,
     )
-    p.add_argument("--image", required=True, help="Input image path")
-    p.add_argument(
-        "--out", default="out_depth.png", help="Output image path (colored depth)"
-    )
-    p.add_argument(
-        "--device",
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        choices=["cpu", "cuda"],
-        help="Device to run on",
-    )
-    p.add_argument(
-        "--denoising_steps",
-        type=int,
-        default=None,
-        help="Number of denoising steps (None = use model default)",
-    )
-    p.add_argument("--ensemble_size", type=int, default=1, help="Ensemble size")
-    p.add_argument(
-        "--processing_res",
-        type=int,
-        default=512,
-        help="Processing resolution (0 = original)",
-    )
-    p.add_argument(
-        "--no_color", action="store_true", help="Skip saving colorized depth image"
-    )
-    return p.parse_args()
 
 
 def main():
-    args = parse_args()
+    args = get_config()
 
     # prepare device and dtype
     device = torch.device(
@@ -83,51 +103,70 @@ def main():
 
     pipe = pipe.to(device)
 
-    # load image
-    img = Image.open(args.image).convert("RGB")
+    # gather input images
+    examples_dir = Path(args.examples_dir)
+    if not examples_dir.exists():
+        print(f"Examples directory not found: {examples_dir}")
+        return
 
-    print("Running inference... this may take some time depending on model/device")
-    out = pipe(
-        img,
-        denoising_steps=args.denoising_steps,
-        ensemble_size=args.ensemble_size,
-        processing_res=args.processing_res,
-        match_input_res=True,
-        show_progress_bar=True,
-    )
+    # collect files using glob (non-recursive); use rglob if you want recursive
+    files = sorted(examples_dir.glob(args.pattern))
+    if len(files) == 0:
+        print(f"No files found in {examples_dir} matching pattern {args.pattern}")
+        return
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save colorized depth if available
-    if (not args.no_color) and out.depth_colored is not None:
-        print(f"Saving colorized depth to {out_path}")
-        out.depth_colored.save(out_path)
-    else:
-        # fallback: save grayscale depth and numpy
-        depth_np = out.depth_np
-        depth_img = (depth_np * 255.0).astype("uint8")
-        if depth_img.ndim == 2:
-            img_pil = Image.fromarray(depth_img)
+    print(f"Running inference on {len(files)} files... this may take a while.")
+    for inp in files:
+        try:
+            img = Image.open(inp).convert("RGB")
+        except Exception as e:
+            print(f"Skipping {inp} (could not open): {e}")
+            continue
+
+        print(f"Processing {inp} ...")
+        out = pipe(
+            img,
+            denoising_steps=args.denoising_steps,
+            ensemble_size=args.ensemble_size,
+            processing_res=args.processing_res,
+            match_input_res=True,
+            show_progress_bar=False,
+        )
+
+        # build output path using input stem
+        out_path = out_dir / f"{inp.stem}_depth.png"
+
+        # Save colorized depth if available
+        if (not args.no_color) and out.depth_colored is not None:
+            print(f"Saving colorized depth to {out_path}")
+            out.depth_colored.save(out_path)
         else:
-            # if single-channel shaped as [H,W] or [C,H,W]
-            if depth_img.ndim == 3 and depth_img.shape[0] == 1:
-                depth_img = depth_img.squeeze(0)
-            img_pil = Image.fromarray(depth_img)
-        print(f"Saving grayscale depth to {out_path}")
-        img_pil.save(out_path)
+            # fallback: save grayscale depth and numpy
+            depth_np = out.depth_np
+            depth_img = (depth_np * 255.0).astype("uint8")
+            if depth_img.ndim == 2:
+                img_pil = Image.fromarray(depth_img)
+            else:
+                if depth_img.ndim == 3 and depth_img.shape[0] == 1:
+                    depth_img = depth_img.squeeze(0)
+                img_pil = Image.fromarray(depth_img)
+            print(f"Saving grayscale depth to {out_path}")
+            img_pil.save(out_path)
 
-    # also save numpy file next to the image
-    np_path = out_path.with_suffix(out_path.suffix + ".npy")
-    try:
-        import numpy as _np
+        # also save numpy file next to the image
+        np_path = out_path.with_suffix(out_path.suffix + ".npy")
+        try:
+            import numpy as _np
 
-        _np.save(str(np_path), out.depth_np)
-        print(f"Saved depth numpy to {np_path}")
-    except Exception:
-        print("Could not save numpy file (numpy may be missing).")
+            _np.save(str(np_path), out.depth_np)
+            print(f"Saved depth numpy to {np_path}")
+        except Exception:
+            print("Could not save numpy file (numpy may be missing).")
 
-    print("Done.")
+    print("All done.")
 
 
 if __name__ == "__main__":
